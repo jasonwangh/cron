@@ -11,19 +11,20 @@ import (
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries   []*Entry
-	chain     Chain
-	stop      chan struct{}
-	add       chan *Entry
-	remove    chan EntryID
-	snapshot  chan chan []Entry
-	running   bool
-	logger    Logger
-	runningMu sync.Mutex
-	location  *time.Location
-	parser    Parser
-	nextID    EntryID
-	jobWaiter sync.WaitGroup
+	entries    []*Entry
+	chain      Chain
+	stop       chan struct{}
+	add        chan *Entry
+	remove     chan EntryID
+	snapshot   chan chan []Entry
+	running    bool
+	logger     Logger
+	runningMu  sync.Mutex
+	location   *time.Location
+	parser     Parser
+	nextID     EntryID
+	jobWaiter  sync.WaitGroup
+	timeOffset *TimeOffset
 }
 
 // Job is an interface for submitted cron jobs.
@@ -107,17 +108,18 @@ func (s byTime) Less(i, j int) bool {
 // See "cron.With*" to modify the default behavior.
 func New(opts ...Option) *Cron {
 	c := &Cron{
-		entries:   nil,
-		chain:     NewChain(),
-		add:       make(chan *Entry),
-		stop:      make(chan struct{}),
-		snapshot:  make(chan chan []Entry),
-		remove:    make(chan EntryID),
-		running:   false,
-		runningMu: sync.Mutex{},
-		logger:    DefaultLogger,
-		location:  time.Local,
-		parser:    standardParser,
+		entries:    nil,
+		chain:      NewChain(),
+		add:        make(chan *Entry),
+		stop:       make(chan struct{}),
+		snapshot:   make(chan chan []Entry),
+		remove:     make(chan EntryID),
+		running:    false,
+		runningMu:  sync.Mutex{},
+		logger:     DefaultLogger,
+		location:   time.Local,
+		parser:     standardParser,
+		timeOffset: NewTimeOffset(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -129,6 +131,10 @@ func New(opts ...Option) *Cron {
 type FuncJob func()
 
 func (f FuncJob) Run() { f() }
+
+func (c *Cron) TimeOffset() *TimeOffset {
+	return c.timeOffset
+}
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
 // The spec is parsed using the time zone of this Cron instance as the default.
@@ -235,6 +241,7 @@ func (c *Cron) run() {
 	c.logger.Info("start")
 
 	// Figure out the next activation times for each entry.
+	c.timeOffset.SetNow()
 	now := c.now()
 	for _, entry := range c.entries {
 		entry.Next = entry.Schedule.Next(now)
@@ -255,8 +262,10 @@ func (c *Cron) run() {
 		}
 
 		for {
+			c.timeOffset.SetNow()
 			select {
 			case now = <-timer.C:
+				now = now.Add(c.timeOffset.GetOffset())
 				now = now.In(c.location)
 				c.logger.Info("wake", "now", now)
 
@@ -310,7 +319,8 @@ func (c *Cron) startJob(j Job) {
 
 // now returns current time in c location
 func (c *Cron) now() time.Time {
-	return time.Now().In(c.location)
+	return c.timeOffset.Now().In(c.location)
+	//return time.Now().In(c.location)
 }
 
 // Stop stops the cron scheduler if it is running; otherwise it does nothing.
